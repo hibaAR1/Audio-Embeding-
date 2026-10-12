@@ -1,47 +1,49 @@
-import faiss
+import pandas as pd
 import numpy as np
+import faiss
 from sklearn.decomposition import PCA
+import pickle
+import os
 
-print("🔍 Étape 1 : Lecture des index existants...")
-# 1. On charge tes index FAISS actuels
-index_panns = faiss.read_index("index_panns.bin")
-index_ssl = faiss.read_index("index_ssl.bin")
+print("🔍 Étape 1 : Alignement et lecture des fichiers .npy...")
 
-# 2. Extraction des infos de base
-num_vectors = index_panns.ntotal
-dim_panns = index_panns.d
-dim_ssl = index_ssl.d
+# Chargement de la liste officielle des fichiers
+with open('filenames_panns.txt', 'r') as f:
+    all_files = [l.strip() for l in f]
 
-print(f"📊 Fichiers trouvés : {num_vectors} audios.")
-print(f"🧬 Dimension PANNs : {dim_panns} | Dimension SSL : {dim_ssl}")
+vecteurs_hybrides_list = []
+fichiers_valides = []
 
-print("🧱 Extraction des vecteurs depuis la mémoire de FAISS (Méthode robuste)...")
-# On crée des tableaux vides pour recevoir les données
-vecteurs_panns = np.zeros((num_vectors, dim_panns), dtype='float32')
-vecteurs_ssl = np.zeros((num_vectors, dim_ssl), dtype='float32')
+# Fusion par alignement strict des noms de fichiers
+for f in all_files:
+    p_panns = f'embeddings_panns/{f.replace(".wav", ".npy")}'
+    p_ssl = f'embeddings_ssl/{f.replace(".wav", ".npy")}'
+    
+    if os.path.exists(p_panns) and os.path.exists(p_ssl):
+        v_panns = np.load(p_panns).flatten()
+        v_ssl = np.load(p_ssl).flatten()
+        
+        # Concaténation propre sur le même fichier
+        v_hybride = np.concatenate([v_panns, v_ssl])
+        vecteurs_hybrides_list.append(v_hybride)
+        fichiers_valides.append(f)
 
-# On extrait les vecteurs un par un pour éviter le bug Windows
-for i in range(num_vectors):
-    vecteurs_panns[i] = index_panns.reconstruct(i)
-    vecteurs_ssl[i] = index_ssl.reconstruct(i)
+vecteurs_hybrides = np.array(vecteurs_hybrides_list, dtype='float32')
+print(f"🤝 Étape 2 : Fusion alignée réussie. Matrice globale : {vecteurs_hybrides.shape}")
 
-print("🤝 Étape 2 : Fusion (Concaténation) des deux mondes...")
-# On colle le vecteur sémantique et le vecteur acoustique côte à côte
-vecteurs_hybrides = np.hstack((vecteurs_panns, vecteurs_ssl))
-print(f"🚀 Nouveau super-vecteur créé ! Dimension : {vecteurs_hybrides.shape[1]} (2816 attendu)")
-
-print("📉 Étape 3 : Compression secrète par ACP (PCA)...")
-# On choisit de compresser à 256 dimensions (ton paramètre secret)
+print("📉 Étape 3 : Compression par ACP...")
 dimension_cible = 256 
 pca = PCA(n_components=dimension_cible)
 vecteurs_comprimes = pca.fit_transform(vecteurs_hybrides).astype('float32')
-print(f"🔒 Vecteurs compressés et chiffrés en {dimension_cible} dimensions !")
+
+# Sauvegarde impérative de l'ACP pour le script de recherche
+with open("pca_model.pkl", "wb") as f_pkl:
+    pickle.dump(pca, f_pkl)
+print("💾 Modèle 'pca_model.pkl' exporté avec succès !")
 
 print("💾 Étape 4 : Création du nouvel Index FAISS Hybride...")
-# Création de l'index FAISS avec la nouvelle dimension réduite
 index_hybride = faiss.IndexFlatL2(dimension_cible)
 index_hybride.add(vecteurs_comprimes)
 
-# Sauvegarde du fichier final
 faiss.write_index(index_hybride, "index_hybrid_pca.bin")
-print("🎉 Terminé ! Le fichier 'index_hybrid_pca.bin' a été généré avec succès.")
+print("🎉 Index synchronisé généré avec succès !")
