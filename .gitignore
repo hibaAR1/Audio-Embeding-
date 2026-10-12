@@ -3,3 +3,11 @@ __pycache__/
 *.pyc
 .env
 .ipynb_checkpoints/
+ESC-50/
+UrbanSound8K/
+features/
+features_urban_final/
+features_*/
+*.npy
+*.pkl
+*.bin
