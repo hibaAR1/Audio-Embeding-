@@ -1,0 +1,11 @@
+,mean,std_seeds
+both_correct,87.67,0.27
+only_ast_correct,7.28,0.13
+only_panns_correct,2.60,0.36
+both_wrong,2.45,0.22
+panns_only_acc,90.27,0.10
+ast_only_acc,94.95,0.15
+oracle,97.55,0.22
+crossgated_acc,94.12,0.32
+recovered_of_only_panns,67.31,3.10
+lost_of_only_ast,37.07,0.95

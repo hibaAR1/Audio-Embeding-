@@ -1,0 +1,6 @@
+model,seed,fold,acc
+crossgated,0,1,0.94
+crossgated,0,2,0.955
+crossgated,0,3,0.93
+crossgated,0,4,0.97
+crossgated,0,5,0.9325
