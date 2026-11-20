@@ -5,9 +5,10 @@ __pycache__/
 .ipynb_checkpoints/
 ESC-50/
 UrbanSound8K/
-features/
-features_urban_final/
-features_*/
+features_v2/
 *.npy
 *.pkl
 *.bin
+*.pth
+*.old-*
+_archive/

@@ -1,29 +1,30 @@
+# Copyright (c) 2026 Hiba Arbel. Released under the MIT License (see the LICENSE file).
 """
-CrossGated : évaluation et ablation sur ESC-50 et UrbanSound8K.
+CrossGated: evaluation and ablation study on ESC-50 and UrbanSound8K.
 
-Le modèle suit exactement l'article :
-  Z-score par pli (estimé sur l'entraînement)
-  -> projections linéaires 2048->128 (PANNs) et 768->128 (AST)
-  -> contexte c = [p ; s] (256 d)
-  -> portes gp = sigmoid(Wgp c + b), gs = sigmoid(Wgs c + b)
-  -> modulation p*gp, s*gs puis concaténation (256 d)
-  -> bloc de fusion : LayerNorm, Linear 256->256, ReLU, Dropout
-  -> MLP : LayerNorm, Linear 256->128, ReLU, Dropout, Linear 128->64, ReLU  (= f)
-  -> classifieur linéaire N classes
-Perte : entropie croisée (lissage 0,1) + lambda(e) * Fisher, lambda(e) = min(0,3 ; 0,01 + 0,005 e)
-Entraînement : AdamW (lr 5e-4, wd 1e-3), batch 16, 60 époques, dropout 0,3, écrêtage 1,0.
-Évaluation à la fin de l'entraînement, SANS sélection de modèle sur le pli de test.
+The model follows the article exactly:
+  z-score per fold (statistics estimated on the training folds)
+  -> linear projections 2048->128 (PANNs) and 768->128 (AST)
+  -> context c = [p ; s] (256-d)
+  -> gates gp = sigmoid(Wgp c + b), gs = sigmoid(Wgs c + b)
+  -> modulation p*gp and s*gs, then concatenation (256-d)
+  -> fusion block: LayerNorm, Linear 256->256, ReLU, Dropout
+  -> MLP: LayerNorm, Linear 256->128, ReLU, Dropout, Linear 128->64, ReLU  (output = f)
+  -> linear classifier with N classes
+Loss: cross-entropy (label smoothing 0.1) + lambda(e) * Fisher, lambda(e) = min(0.3, 0.01 + 0.005 e).
+Training: AdamW (lr 5e-4, weight decay 1e-3), batch 16, 60 epochs, dropout 0.3, gradient clipping 1.0.
+Evaluation at the last epoch, WITHOUT any model selection on the test fold.
 
-Variantes (--models) :
-  svm         SVM RBF (C=10) sur la concaténation standardisée PANNs + AST
-  panns_only  PANNs seul, même tête
-  ast_only    AST seul, même tête
-  concat      concaténation des projections, sans porte, même tête
-  uncrossed   portes non croisées : gp dépend de p seul, gs de s seul
-  nofisher    CrossGated sans perte de Fisher
-  crossgated  méthode complète
+Variants (--models):
+  svm         RBF SVM (C=10) on the standardised concatenation of PANNs + AST
+  panns_only  PANNs alone, same head
+  ast_only    AST alone, same head
+  concat      concatenation of the projections, no gates, same head
+  uncrossed   uncrossed gates: gp depends on p only, gs on s only
+  nofisher    CrossGated without the Fisher loss
+  crossgated  full method
 
-Usage :
+Usage:
   python crossgated.py esc50
   python crossgated.py urban
   python crossgated.py esc50 --models crossgated svm --seeds 0
@@ -46,47 +47,52 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score
 
+# All model variants that can be run (names are used in the result files).
 ALL_MODELS = ["svm", "panns_only", "ast_only", "concat", "uncrossed", "nofisher", "crossgated"]
 
 
 class Config:
-    PROJ = 128
-    FUSION = 256
-    HID = 128
-    DROPOUT = 0.3
-    LR = 5e-4
-    WD = 1e-3
-    BATCH = 16
-    EPOCHS = 60
-    LABEL_SMOOTHING = 0.1
-    CLIP = 1.0
-    SVM_C = 10
+    """Hyper-parameters (same values as in the article, Table 1)."""
+    PROJ = 128              # size of each projected embedding (p and s)
+    FUSION = 256            # width of the fusion block
+    HID = 128               # hidden width of the MLP (its output is HID // 2 = 64)
+    DROPOUT = 0.3           # dropout rate
+    LR = 5e-4               # AdamW learning rate
+    WD = 1e-3               # AdamW weight decay
+    BATCH = 16              # mini-batch size
+    EPOCHS = 60             # number of training epochs
+    LABEL_SMOOTHING = 0.1   # label smoothing of the cross-entropy
+    CLIP = 1.0              # gradient-norm clipping
+    SVM_C = 10              # C of the RBF SVM
 
 
 def fisher_weight(epoch):
+    """Weight lambda(e) of the Fisher loss: grows linearly with the epoch, capped at 0.3."""
     return min(0.3, 0.01 + 0.005 * epoch)
 
 
 # ============================================================
-# PERTE DE FISHER
+# FISHER LOSS
 # ============================================================
 def fisher_loss(f, y, n_cls):
-    """Rapport dispersion intra-classe / dispersion inter-classe sur le mini-batch.
+    """Ratio of within-class dispersion to between-class dispersion on the mini-batch.
 
-    intra : moyenne, sur les exemples des classes présentes au moins 2 fois,
-            de ||f_i - mu_k||^2 (une classe vue une seule fois n'a pas de dispersion mesurable)
-    inter : moyenne pondérée par n_k de ||mu_k - mu||^2 sur les classes présentes
+    f: features of the batch (B, D); y: labels (B,); n_cls: number of classes K.
+    within : mean, over the examples of classes seen at least twice in the batch,
+             of ||f_i - mu_k||^2 (a class seen once has no measurable dispersion)
+    between: mean weighted by n_k of ||mu_k - mu||^2 over the classes present
+    The small constant 1e-6 (epsilon of the article) avoids a division by zero.
     """
-    onehot = F.one_hot(y, n_cls).float()                  # (B, K)
-    counts = onehot.sum(0)                                # (K,)
+    onehot = F.one_hot(y, n_cls).float()                  # one-hot labels (B, K)
+    counts = onehot.sum(0)                                # number of examples per class in the batch (K,)
     present = counts > 0
     if present.sum() < 2:
         return f.new_zeros(())
-    means = (onehot.t() @ f) / counts.clamp(min=1).unsqueeze(1)   # (K, D)
-    mu = f.mean(0)
+    means = (onehot.t() @ f) / counts.clamp(min=1).unsqueeze(1)   # class means mu_k (K, D)
+    mu = f.mean(0)                                        # global mean
     inter = (counts[present] * ((means[present] - mu) ** 2).sum(1)).sum() / f.shape[0]
 
-    valid = (counts >= 2)[y]                              # exemples d'une classe vue >= 2 fois
+    valid = (counts >= 2)[y]                              # examples of a class seen >= 2 times
     if valid.sum() == 0:
         return f.new_zeros(())
     intra = ((f - means[y]) ** 2).sum(1)[valid].mean()
@@ -94,9 +100,10 @@ def fisher_loss(f, y, n_cls):
 
 
 # ============================================================
-# MODÈLES
+# MODELS
 # ============================================================
 def make_head(in_dim, n_cls):
+    """Classification head shared by all variants: fusion block, MLP and linear classifier."""
     fusion = nn.Sequential(
         nn.LayerNorm(in_dim), nn.Linear(in_dim, Config.FUSION), nn.ReLU(), nn.Dropout(Config.DROPOUT),
     )
@@ -110,7 +117,7 @@ def make_head(in_dim, n_cls):
 
 
 class FusionNet(nn.Module):
-    """Une seule classe pour toutes les variantes, pour que la tête soit strictement identique."""
+    """One class for all variants, so that the head is strictly identical in every comparison."""
 
     def __init__(self, variant, panns_dim, ast_dim, n_cls):
         super().__init__()
@@ -124,16 +131,17 @@ class FusionNet(nn.Module):
             self.proj_s = nn.Linear(ast_dim, P)
 
         if variant in ("crossgated", "nofisher"):
-            self.gate_p = nn.Linear(2 * P, P)            # porte calculée sur c = [p ; s]
+            self.gate_p = nn.Linear(2 * P, P)            # gate computed from c = [p ; s] (crossed gate)
             self.gate_s = nn.Linear(2 * P, P)
         elif variant == "uncrossed":
-            self.gate_p = nn.Linear(P, P)                # porte calculée sur p seul
+            self.gate_p = nn.Linear(P, P)                # gate computed from p alone (uncrossed gate)
             self.gate_s = nn.Linear(P, P)
 
         in_dim = P * (int(self.use_p) + int(self.use_s))
         self.fusion, self.mlp, self.clf = make_head(in_dim, n_cls)
 
     def forward(self, xp, xs):
+        """Return (class scores, feature f used by the Fisher loss, gates or None)."""
         gates = None
         if self.variant == "panns_only":
             f0 = self.proj_p(xp)
@@ -156,13 +164,15 @@ class FusionNet(nn.Module):
 
 
 def count_params(model):
+    """Number of trainable parameters."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 # ============================================================
-# ENTRAÎNEMENT
+# TRAINING
 # ============================================================
 def set_seed(seed):
+    """Fix every random generator so that a run can be repeated."""
     import random
     random.seed(seed)
     np.random.seed(seed)
@@ -171,6 +181,7 @@ def set_seed(seed):
 
 
 def train_net(variant, Xp, Xs, y, n_cls, seed, device):
+    """Train one head on the standardised embeddings of the training folds; return the model."""
     set_seed(seed)
     model = FusionNet(variant, Xp.shape[1], Xs.shape[1], n_cls).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=Config.LR, weight_decay=Config.WD)
@@ -181,11 +192,11 @@ def train_net(variant, Xp, Xs, y, n_cls, seed, device):
     Xs_t = torch.as_tensor(Xs, dtype=torch.float32, device=device)
     y_t = torch.as_tensor(y, dtype=torch.long, device=device)
     n = len(y)
-    gen = torch.Generator().manual_seed(seed)
+    gen = torch.Generator().manual_seed(seed)          # controls the shuffling of the batches
 
     for epoch in range(Config.EPOCHS):
         model.train()
-        lam = fisher_weight(epoch)
+        lam = fisher_weight(epoch)                     # Fisher weight for this epoch
         order = torch.randperm(n, generator=gen).to(device)
         for start in range(0, n, Config.BATCH):
             idx = order[start:start + Config.BATCH]
@@ -202,6 +213,7 @@ def train_net(variant, Xp, Xs, y, n_cls, seed, device):
 
 @torch.no_grad()
 def predict(model, Xp, Xs, device, return_gates=False):
+    """Predicted classes (and, if asked, the gate values of every clip) for the test fold."""
     model.eval()
     Xp_t = torch.as_tensor(Xp, dtype=torch.float32, device=device)
     Xs_t = torch.as_tensor(Xs, dtype=torch.float32, device=device)
@@ -219,9 +231,10 @@ def predict(model, Xp, Xs, device, return_gates=False):
 
 
 # ============================================================
-# ÉVALUATION
+# EVALUATION
 # ============================================================
 def load_features(features_dir, ast_file):
+    """Load the frozen embeddings, the labels and the predefined fold of every clip."""
     d = Path(features_dir)
     p = np.load(d / "panns.npy").astype(np.float32)
     s = np.load(d / ast_file).astype(np.float32)
@@ -234,6 +247,7 @@ def load_features(features_dir, ast_file):
 
 
 def run(args):
+    """Train and test every requested model on every fold and seed (resumable)."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     features_dir = args.features or os.path.join("features_v2", args.dataset)
     p, s, y, folds = load_features(features_dir, args.ast_file)
@@ -250,7 +264,7 @@ def run(args):
     tag = f"{args.dataset}" + ("" if args.ast_file == "ast.npy" else f"_{Path(args.ast_file).stem}")
     csv_path = out_dir / f"{tag}_results.csv"
     gates_path = out_dir / f"{tag}_gates.csv"
-    res_paths = [csv_path, backup_of(csv_path)]               # copie de secours sur le disque C:
+    res_paths = [csv_path, backup_of(csv_path)]               # backup copy on disk C:
     preds_path = out_dir / f"{tag}_preds.csv"
     preds_paths = [preds_path, backup_of(preds_path)]
     gate_paths = [gates_path, backup_of(gates_path)]
@@ -272,11 +286,11 @@ def run(args):
     for seed in args.seeds:
         for fold in fold_ids:
             todo = [v for v in args.models if (v, seed, fold) not in done
-                    and not (v == "svm" and seed != args.seeds[0])]   # le SVM est déterministe : une seule exécution
+                    and not (v == "svm" and seed != args.seeds[0])]   # the SVM is deterministic: run it only once
             if not todo:
                 continue
             tr, te = folds != fold, folds == fold
-            # Z-score par branche, estimé sur l'entraînement du pli
+            # z-score per branch, estimated on the training folds only (never on the test fold)
             sc_p, sc_s = StandardScaler().fit(p[tr]), StandardScaler().fit(s[tr])
             Pt, Pe = sc_p.transform(p[tr]).astype(np.float32), sc_p.transform(p[te]).astype(np.float32)
             St, Se = sc_s.transform(s[tr]).astype(np.float32), sc_s.transform(s[te]).astype(np.float32)
@@ -317,10 +331,11 @@ def run(args):
 
 
 # ============================================================
-# ENREGISTREMENT SÛR DES RÉSULTATS
-# Chaque résultat est AJOUTÉ à la fin du fichier (jamais de réécriture complète),
-# et recopié dans une sauvegarde sur le disque C: (dossier crossgated_backup).
-# Si le disque du projet se déconnecte, aucun résultat déjà calculé n'est effacé.
+# SAFE STORAGE OF THE RESULTS
+# Each result is APPENDED to the end of the file (the file is never rewritten),
+# and copied to a backup folder in the user's home directory (crossgated_backup).
+# If the project disk disconnects, no result that was already computed is lost.
+# This only protects long runs; it does not change the results.
 # ============================================================
 RESULT_COLS = ["model", "seed", "fold", "acc"]
 KEY_COLS = ["model", "seed", "fold"]
@@ -329,13 +344,13 @@ BACKUP_DIR = Path.home() / "crossgated_backup"
 
 
 def backup_of(path):
-    """Copie de secours sur C:, nommée d'après le dossier et le fichier (ex. results_urban_results.csv)."""
+    """Backup path of a result file, named after its folder and file (e.g. results_urban_results.csv)."""
     path = Path(path)
     return BACKUP_DIR / f"{path.parent.resolve().name}_{path.name}"
 
 
 def sync_backup(df, path):
-    """Réécrit la sauvegarde avec l'union des résultats connus (elle ne peut que grandir)."""
+    """Rewrite the backup with the union of the known results (it can only grow)."""
     tmp = path.with_suffix(".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -350,12 +365,13 @@ def sync_backup(df, path):
 
 
 def read_rows(paths, cols, key_cols):
+    """Read result rows from the project file and its backup, drop damaged or duplicate rows."""
     frames = []
     for path in paths:
         try:
             if not path.exists():
                 continue
-            # on_bad_lines="skip" : ignore une ligne coupée par un disque plein ou débranché
+            # on_bad_lines="skip": ignore a line cut by a full or disconnected disk
             df = pd.read_csv(path, dtype=str, on_bad_lines="skip")
         except OSError as e:
             sys.exit(f"ERREUR : impossible de lire {path} ({e}).\n"
@@ -364,7 +380,7 @@ def read_rows(paths, cols, key_cols):
             continue
         if any(c not in df.columns for c in cols):
             continue
-        df = df[df[cols[0]] != cols[0]]                     # en-têtes répétés éventuels
+        df = df[df[cols[0]] != cols[0]]                     # possible repeated headers
         frames.append(df[cols])
     if not frames:
         return pd.DataFrame(columns=cols)
@@ -379,7 +395,7 @@ def read_rows(paths, cols, key_cols):
 
 
 def _warn_backup(path, e):
-    """La copie de secours sur C: a échoué mais le fichier principal est écrit : on continue."""
+    """The backup copy failed but the main file is written: warn once and continue."""
     global _BACKUP_WARNED
     if not _BACKUP_WARNED:
         print(f"ATTENTION : copie de secours impossible dans {path} ({e}). "
@@ -392,7 +408,7 @@ _BACKUP_WARNED = False
 
 
 def append_frame(paths, df):
-    """Ajoute un bloc de lignes (prédictions) à la fin de chaque fichier, sans réécrire l'existant."""
+    """Append a block of rows (predictions) to the end of every file, without rewriting the existing ones."""
     written = False
     for i, path in enumerate(paths):
         try:
@@ -410,6 +426,7 @@ def append_frame(paths, df):
 
 
 def append_row(paths, row, cols):
+    """Append one result row (one line of text) to every file, writing the header if the file is new."""
     line = ",".join(str(row[c]) for c in cols) + "\n"
     written = False
     for i, path in enumerate(paths):
@@ -432,6 +449,7 @@ def append_row(paths, row, cols):
 
 
 def summarize(csv_path):
+    """Print mean accuracy per model and the paired Wilcoxon test of CrossGated against each variant."""
     csv_path = Path(csv_path)
     df = read_rows([csv_path, backup_of(csv_path)], RESULT_COLS, KEY_COLS)
     print(f"\n{'=' * 64}\nRÉSULTATS : {csv_path}\n{'=' * 64}")
@@ -440,8 +458,8 @@ def summarize(csv_path):
     fold_means = {}
     for m in order:
         d = df[df["model"] == m]
-        per_seed = d.groupby("seed")["acc"].mean() * 100            # accuracy moyenne par graine
-        per_fold = d.groupby("fold")["acc"].mean() * 100            # moyenne des graines par pli
+        per_seed = d.groupby("seed")["acc"].mean() * 100            # mean accuracy of each seed
+        per_fold = d.groupby("fold")["acc"].mean() * 100            # mean over the seeds, for each fold
         fold_means[m] = per_fold
         print(f"{m:<12} {per_seed.mean():7.1f} % {per_fold.std(ddof=0):7.1f} "
               f"{per_seed.std(ddof=0):9.1f} {d['seed'].nunique():>8}")
@@ -466,6 +484,7 @@ def summarize(csv_path):
 
 
 def main():
+    """Command line: run the evaluation, or print the summary of an existing result file."""
     if len(sys.argv) > 2 and sys.argv[1] == "summary":
         summarize(sys.argv[2])
         return

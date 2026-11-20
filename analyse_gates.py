@@ -1,18 +1,19 @@
+# Copyright (c) 2026 Hiba Arbel. Released under the MIT License (see the LICENSE file).
 """
-Analyse des portes de CrossGated, classe par classe.
+Analysis of the CrossGated gates, class by class.
 
-Lit results_gates/<dataset>_gates.csv (valeur moyenne des portes par classe et par pli)
-et produit :
-  - <dataset>_gates_par_classe.csv : tableau par classe
-  - <dataset>_gates_par_classe.pdf / .png : figure pour l'article
+Reads results_gates/<dataset>_gates.csv (mean gate value per class and per fold)
+and produces:
+  - <dataset>_gates_par_classe.csv: table per class
+  - <dataset>_gates_par_classe.pdf / .png: figure for the article
 
-Mesure utilisée, pour chaque classe :
-  écart = moyenne(porte AST) - moyenne(porte PANNs)
-  > 0 : la classe laisse passer davantage la branche AST
-  < 0 : la classe laisse passer davantage la branche PANNs
-Les moyennes sont pondérées par le nombre d'extraits de test de chaque pli.
+Measure used, for each class:
+  difference = mean(AST gate) - mean(PANNs gate)
+  > 0: the class lets more of the AST branch through
+  < 0: the class lets more of the PANNs branch through
+The means are weighted by the number of test clips of each fold.
 
-Usage :
+Usage:
   python analyse_gates.py urban
   python analyse_gates.py esc50 --esc50-meta ESC-50/meta/esc50.csv
 """
@@ -28,13 +29,14 @@ import matplotlib.pyplot as plt
 URBAN_NAMES = ["air_conditioner", "car_horn", "children_playing", "dog_bark", "drilling",
                "engine_idling", "gun_shot", "jackhammer", "siren", "street_music"]
 
-# mêmes couleurs que la figure d'architecture
+# same colours as the architecture figure
 COLOR_PANNS = "#3B7DD8"
 COLOR_AST = "#D9741F"
 INK, MUTED, GRID = "#1F2328", "#5B616B", "#D9DCE1"
 
 
 def class_names(dataset, meta):
+    """Dictionary {class number: class name} for the dataset (ESC-50 names come from its metadata file)."""
     if dataset == "urban":
         return dict(enumerate(URBAN_NAMES))
     if meta and Path(meta).exists():
@@ -46,6 +48,7 @@ def class_names(dataset, meta):
 
 
 def summarize(df, names):
+    """For each class: mean gate of each branch (weighted by the number of test clips) and their difference."""
     rows = []
     for c, d in df.groupby("class"):
         w = d["n"].to_numpy(float)
@@ -60,6 +63,7 @@ def summarize(df, names):
 
 
 def plot(tab, dataset, out):
+    """Bar chart of the gate difference per class, with the range between folds; save as PDF and PNG."""
     n = len(tab)
     height = max(2.6, 0.24 * n + 1.0)
     fig, ax = plt.subplots(figsize=(6.4, height))
@@ -67,7 +71,7 @@ def plot(tab, dataset, out):
     vals = tab["ecart_ast_moins_panns"].to_numpy()
     colors = [COLOR_AST if v > 0 else COLOR_PANNS for v in vals]
     ax.barh(y, vals, height=0.62, color=colors, edgecolor="white", linewidth=1.0, zorder=3)
-    # étendue entre plis : du plus petit au plus grand écart observé
+    # range between folds: from the smallest to the largest difference observed
     ax.hlines(y, tab["ecart_min_plis"], tab["ecart_max_plis"], color=MUTED, linewidth=1.0, zorder=4)
     ax.axvline(0, color=INK, linewidth=0.9, zorder=5)
     ax.set_yticks(y, [s.replace("_", " ") for s in tab["name"]], fontsize=8.5, color=INK)
@@ -90,16 +94,17 @@ def plot(tab, dataset, out):
 
 
 def main():
+    """Read the gate values written by crossgated.py, summarise them per class, write the table and the figure."""
     ap = argparse.ArgumentParser()
     ap.add_argument("dataset", choices=["esc50", "urban"])
-    ap.add_argument("--gates", default=None, help="Fichier des portes (défaut : results_gates/<dataset>_gates.csv)")
+    ap.add_argument("--gates", default=None, help="Gate file (default: results_gates/<dataset>_gates.csv)")
     ap.add_argument("--esc50-meta", default="ESC-50/meta/esc50.csv")
     ap.add_argument("--out", default="results_gates")
     args = ap.parse_args()
 
     path = Path(args.gates or f"results_gates/{args.dataset}_gates.csv")
     df = pd.read_csv(path, dtype=str)
-    df = df[df["seed"] != "seed"]                               # en-têtes répétés éventuels
+    df = df[df["seed"] != "seed"]                               # possible repeated headers
     for c in ["seed", "fold", "class", "gate_panns", "gate_ast", "n"]:
         df[c] = pd.to_numeric(df[c])
     df = df.drop_duplicates(subset=["seed", "fold", "class"])

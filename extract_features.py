@@ -1,22 +1,23 @@
+# Copyright (c) 2026 Hiba Arbel. Released under the MIT License (see the LICENSE file).
 """
-Extraction des représentations PANNs CNN14 et AST pour ESC-50 et UrbanSound8K.
+Extraction of the PANNs CNN14 and AST embeddings for ESC-50 and UrbanSound8K.
 
-Ce que fait ce script (conforme à l'article) :
-  - charge chaque fichier en mono à 32 kHz, tronque ou complète à 5 s ;
-  - PANNs CNN14 (gelé, 32 kHz) : embedding de 2048 dimensions
-    (la 2e sortie de panns_inference, PAS les 527 scores de classes) ;
-  - AST MIT/ast-finetuned-audioset-10-10-0.4593 (gelé, 16 kHz) :
-      ast.npy      = moyenne de TOUS les tokens de la dernière couche (768 d)
-      ast_real.npy = moyenne des seuls patches qui couvrent l'audio réel (768 d)
-    (l'extracteur AST complète chaque entrée jusqu'à 1024 trames, soit ~10 s :
-     ast.npy inclut donc ce remplissage, ast_real.npy l'exclut).
+What this script does (as described in the article):
+  - loads each file as mono at 32 kHz, cut or zero-padded to 5 s;
+  - PANNs CNN14 (frozen, 32 kHz): 2048-d embedding
+    (the 2nd output of panns_inference, NOT the 527 class scores);
+  - AST MIT/ast-finetuned-audioset-10-10-0.4593 (frozen, 16 kHz):
+      ast.npy      = mean of ALL the tokens of the last layer (768-d)
+      ast_real.npy = mean of only the patches that cover real audio (768-d)
+    (the AST feature extractor pads every input to 1024 frames, about 10 s:
+     ast.npy therefore includes this padding, ast_real.npy excludes it).
 
-Usage :
-  python extract_features.py esc50 --data "C:\\chemin\\vers\\ESC-50"
-  python extract_features.py urban --data "C:\\chemin\\vers\\UrbanSound8K"
+Usage:
+  python extract_features.py esc50 --data "C:\\path\\to\\ESC-50"
+  python extract_features.py urban --data "C:\\path\\to\\UrbanSound8K"
 
-Les fichiers sont écrits dans features_v2/esc50/ ou features_v2/urban/.
-Si l'extraction est interrompue, relance la même commande : elle reprend là où elle s'est arrêtée.
+The files are written to features_v2/esc50/ or features_v2/urban/.
+If the extraction is interrupted, run the same command again: it resumes where it stopped.
 """
 import os
 import sys
@@ -31,12 +32,15 @@ import pandas as pd
 import librosa
 import torch
 
-SR = 32000
-AST_SR = 16000
-DURATION = 5.0
+# Audio and model settings
+SR = 32000                    # sampling rate used for PANNs
+AST_SR = 16000                # sampling rate used for AST
+DURATION = 5.0                # every clip is cut or padded to 5 s
 N_SAMPLES = int(SR * DURATION)
 AST_MODEL = "MIT/ast-finetuned-audioset-10-10-0.4593"
-CHECKPOINT_EVERY = 200
+CHECKPOINT_EVERY = 200        # save partial results every 200 files (allows resuming)
+
+# PANNs checkpoint and AudioSet label file (downloaded if missing)
 
 PANNS_DIR = Path.home() / "panns_data"
 PANNS_CKPT = PANNS_DIR / "Cnn14_mAP=0.431.pth"
@@ -46,7 +50,7 @@ LABELS_CSV_URL = "http://storage.googleapis.com/us_audioset/youtube_corpus/v1/cs
 
 
 def ensure_panns_files():
-    """panns_inference télécharge ses fichiers avec wget, absent sous Windows : on le fait ici."""
+    """Download the PANNs files if missing (panns_inference uses wget, which is absent on Windows)."""
     PANNS_DIR.mkdir(parents=True, exist_ok=True)
     if not LABELS_CSV.exists():
         print("Téléchargement de class_labels_indices.csv ...")
@@ -57,7 +61,7 @@ def ensure_panns_files():
 
 
 def list_files(dataset, data_dir):
-    """Renvoie une table avec chemin, label, pli et nom de fichier."""
+    """Return a table with the path, label, predefined fold and file name of every clip."""
     data_dir = Path(data_dir)
     if dataset == "esc50":
         meta = pd.read_csv(data_dir / "meta" / "esc50.csv")
@@ -67,7 +71,7 @@ def list_files(dataset, data_dir):
             "fold": meta["fold"].astype(int),
             "name": meta["filename"],
         })
-    # UrbanSound8K : accepte le dossier parent ou le dossier interne
+    # UrbanSound8K: accept either the parent folder or the inner folder
     if not (data_dir / "metadata").exists() and (data_dir / "UrbanSound8K" / "metadata").exists():
         data_dir = data_dir / "UrbanSound8K"
     meta = pd.read_csv(data_dir / "metadata" / "UrbanSound8K.csv")
@@ -81,7 +85,7 @@ def list_files(dataset, data_dir):
 
 
 def load_audio(path):
-    """Mono, 32 kHz, tronqué ou complété par des zéros à 5 s. Renvoie aussi la durée réelle."""
+    """Mono, 32 kHz, cut or zero-padded to 5 s. Also returns the real duration in seconds."""
     wav, _ = librosa.load(path, sr=SR, mono=True)
     real_len = min(len(wav), N_SAMPLES)
     if len(wav) < N_SAMPLES:
@@ -92,8 +96,8 @@ def load_audio(path):
 
 
 def ast_real_time_patches(real_seconds, n_time_patches):
-    """Nombre de colonnes temporelles de patches AST qui couvrent de l'audio réel.
-    Trames fbank : fenêtre 25 ms, pas 10 ms ; patches de 16 trames, pas de 10 trames."""
+    """Number of time columns of AST patches that cover real audio.
+    Fbank frames: 25 ms window, 10 ms hop; patches of 16 frames with a stride of 10 frames."""
     n_frames = max(1, int((real_seconds * AST_SR - 400) // 160) + 1)
     return int(min(n_time_patches, max(1, math.ceil(n_frames / 10))))
 
@@ -105,12 +109,14 @@ def main():
     parser.add_argument("--out", default="features_v2", help="Dossier de sortie")
     args = parser.parse_args()
 
+    # Use the GPU if there is one, otherwise the CPU
     device = "cuda" if torch.cuda.is_available() else "cpu"
     out_dir = Path(args.out) / args.dataset
     out_dir.mkdir(parents=True, exist_ok=True)
-    partial = out_dir / "_partial.npz"
+    partial = out_dir / "_partial.npz"          # partial results, used to resume an interrupted run
 
     files = list_files(args.dataset, args.data)
+    # Stop early if some audio files cannot be found
     missing = [p for p in files["path"] if not os.path.exists(p)]
     if missing:
         print(f"ERREUR : {len(missing)} fichiers audio introuvables, par exemple :\n  {missing[0]}")
@@ -123,14 +129,15 @@ def main():
     from panns_inference import AudioTagging
     from transformers import ASTFeatureExtractor, ASTModel
 
+    # Load the two frozen encoders (no training happens in this script)
     panns = AudioTagging(checkpoint_path=str(PANNS_CKPT), device=device)
     ast_fe = ASTFeatureExtractor.from_pretrained(AST_MODEL)
     ast = ASTModel.from_pretrained(AST_MODEL).to(device).eval()
 
     n = len(files)
-    P = np.zeros((n, 2048), np.float32)
-    A = np.zeros((n, 768), np.float32)
-    A_real = np.zeros((n, 768), np.float32)
+    P = np.zeros((n, 2048), np.float32)          # PANNs embeddings
+    A = np.zeros((n, 768), np.float32)           # AST: mean of all tokens (ast.npy)
+    A_real = np.zeros((n, 768), np.float32)      # AST: mean of the real-audio patches only
     start = 0
     if partial.exists():
         z = np.load(partial)
@@ -142,26 +149,27 @@ def main():
     for i in range(start, n):
         wav32, real_sec = load_audio(files["path"].iloc[i])
 
-        # PANNs : (scores 527, embedding 2048) -> on garde l'embedding
+        # PANNs: (527 class scores, 2048-d embedding) -> keep the embedding
         _, emb = panns.inference(wav32[None, :])
         emb = np.asarray(emb).reshape(-1)
         if emb.shape[0] != 2048:
             raise ValueError(f"Embedding PANNs de taille {emb.shape[0]} au lieu de 2048")
         P[i] = emb
 
-        # AST
+        # AST: resample to 16 kHz, compute the spectrogram patches, run the transformer
         wav16 = librosa.resample(wav32, orig_sr=SR, target_sr=AST_SR)
         inputs = ast_fe(wav16, sampling_rate=AST_SR, return_tensors="pt")
         inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
             hidden = ast(**inputs).last_hidden_state[0]          # (2 + 12*101, 768)
         A[i] = hidden.mean(0).cpu().numpy()
-        patches = hidden[2:]                                     # sans les tokens CLS et distillation
-        n_time = patches.shape[0] // 12                          # 101 colonnes temporelles
-        grid = patches.reshape(12, n_time, -1)                   # (fréquence, temps, 768)
+        patches = hidden[2:]                                     # without the CLS and distillation tokens
+        n_time = patches.shape[0] // 12                          # 101 time columns
+        grid = patches.reshape(12, n_time, -1)                   # (frequency, time, 768)
         k = ast_real_time_patches(real_sec, n_time)
         A_real[i] = grid[:, :k].mean((0, 1)).cpu().numpy()
 
+        # Save progress regularly so that a crash does not lose the work
         done = i + 1
         if done % CHECKPOINT_EVERY == 0 or done == n:
             np.savez(partial, P=P, A=A, A_real=A_real, done=done)
@@ -169,6 +177,7 @@ def main():
             remaining = (n - done) / max(speed, 1e-9) / 60
             print(f"  {done}/{n}  ({speed:.1f} fichiers/s, reste ~{remaining:.0f} min)", flush=True)
 
+    # Final files: embeddings, labels, predefined folds and file names
     np.save(out_dir / "panns.npy", P)
     np.save(out_dir / "ast.npy", A)
     np.save(out_dir / "ast_real.npy", A_real)

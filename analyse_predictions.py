@@ -1,34 +1,35 @@
+# Copyright (c) 2026 Hiba Arbel. Released under the MIT License (see the LICENSE file).
 """
-Analyse des prédictions : POURQUOI la fusion aide sur UrbanSound8K et pas sur ESC-50.
+Analysis of the predictions: WHY fusion helps on UrbanSound8K but not on ESC-50.
 
-Lit le fichier de prédictions écrit par :
+Reads the prediction file written by:
   python crossgated.py <dataset> --models panns_only ast_only crossgated --save-preds --out results_preds
 
-Produit deux analyses.
+It produces two analyses.
 
-1) Complémentarité (réponse au « pourquoi ? »)
-   Chaque extrait de test est rangé dans un des 4 cas, selon PANNs seul et AST seul :
-     les deux justes | seul AST juste | seul PANNs juste | les deux faux
-   « Seul PANNs juste » = ce que la fusion peut gagner par rapport à AST seul.
-   Oracle = au moins un des deux juste = plafond de la fusion de ces deux modèles.
-   On donne aussi ce que CrossGated fait de ces cas :
-     récupérés = part des cas « seul PANNs juste » que CrossGated classe bien
-     perdus    = part des cas « seul AST juste » que CrossGated classe mal
-   Les pourcentages sont calculés par pli, moyennés sur les plis puis sur les graines
-   (même calcul que le tableau principal de l'article).
+1) Complementarity (the answer to "why?")
+   Every test clip falls in one of 4 cases, according to PANNs alone and AST alone:
+     both correct | only AST correct | only PANNs correct | both wrong
+   "Only PANNs correct" is what fusion can gain over AST alone.
+   Oracle = at least one of the two is correct = ceiling of the fusion of these two models.
+   We also report what CrossGated does with these cases:
+     recovered = share of the "only PANNs correct" clips that CrossGated classifies correctly
+     lost      = share of the "only AST correct" clips that CrossGated classifies wrongly
+   Percentages are computed per fold, averaged over the folds and then over the seeds
+   (same computation as the main table of the article).
 
-2) Gain par classe
-   Accuracy de chaque classe pour CrossGated moins celle d'AST seul
-   (tous les plis réunis, moyenne des graines ; les traits vont de la plus petite
-   à la plus grande valeur entre graines).
-   Si results_gates/<dataset>_gates_par_classe.csv existe, la figure met le gain
-   à côté de l'écart des portes, avec les classes dans le même ordre.
+2) Gain per class
+   Accuracy of each class for CrossGated minus that of AST alone
+   (all folds together, mean over the seeds; the bars span the smallest to the largest
+   value between seeds).
+   If results_gates/<dataset>_gates_par_classe.csv exists, the figure shows the gain
+   next to the gate difference, with the classes in the same order.
 
-Usage :
+Usage:
   python analyse_predictions.py urban
   python analyse_predictions.py esc50 --esc50-meta ESC-50/meta/esc50.csv
 
-Sorties dans results_preds/ :
+Outputs in results_preds/:
   <dataset>_complementarite.csv
   <dataset>_gain_par_classe.csv
   <dataset>_gain_par_classe.pdf / .png
@@ -44,28 +45,30 @@ import matplotlib.pyplot as plt
 
 from analyse_gates import class_names, COLOR_PANNS, COLOR_AST, INK, MUTED, GRID
 
-COLOR_GAIN, COLOR_LOSS = "#2E7D5B", "#B5475A"     # gain / perte de CrossGated par rapport à AST seul
+COLOR_GAIN, COLOR_LOSS = "#2E7D5B", "#B5475A"     # colours: gain / loss of CrossGated compared with AST alone
+# The three models whose predictions are compared
 NEEDED = ["panns_only", "ast_only", "crossgated"]
 
 
+# Columns of the prediction file (one row per test clip, model and seed)
 COLS = ["model", "seed", "fold", "index", "y_true", "y_pred"]
 
 
 def backup_of(path):
-    """Même règle que crossgated.py : copie de secours sur C:, dossier crossgated_backup."""
+    """Same rule as crossgated.py: backup copy in the crossgated_backup folder of the home directory."""
     return Path.home() / "crossgated_backup" / f"{path.parent.resolve().name}_{path.name}"
 
 
 def read_raw_preds(path, verbose=True):
-    """Toutes les prédictions connues : fichier du projet d'abord, puis la copie de secours sur C:.
-    Les lignes coupées (disque plein ou débranché) sont ignorées."""
+    """All known predictions: the project file first, then its backup copy.
+    Cut lines (full or disconnected disk) are ignored."""
     frames = []
     for p in [path, backup_of(path)]:
         if not p.exists():
             continue
         try:
             d = pd.read_csv(p, dtype=str, on_bad_lines="skip")
-            if not all(c in d.columns for c in COLS):          # fichier sans en-tête
+            if not all(c in d.columns for c in COLS):          # file without a header
                 d = pd.read_csv(p, dtype=str, header=None, names=COLS, on_bad_lines="skip")
         except (pd.errors.EmptyDataError, OSError):
             continue
@@ -75,7 +78,7 @@ def read_raw_preds(path, verbose=True):
     if not frames:
         raise SystemExit(f"Aucun fichier de prédictions trouvé ({path} ou {backup_of(path)}).")
     df = pd.concat(frames, ignore_index=True)
-    df = df[df["model"].isin(NEEDED)]                            # en-têtes répétés, lignes coupées
+    df = df[df["model"].isin(NEEDED)]                            # repeated headers, cut lines
     for c in COLS[1:]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=COLS[1:])
@@ -85,12 +88,13 @@ def read_raw_preds(path, verbose=True):
 
 
 def load_preds(path):
+    """Read the predictions and return one row per (seed, fold, clip) with one 0/1 column per model."""
     df = read_raw_preds(path)
     missing = [m for m in NEEDED if m not in set(df["model"])]
     if missing:
         raise SystemExit(f"Modèles absents de {path} : {missing}. Lance crossgated.py avec "
                          f"--models panns_only ast_only crossgated --save-preds.")
-    # une colonne « correct » par modèle, une ligne par (graine, pli, extrait)
+    # one "correct" column per model, one row per (seed, fold, clip)
     df["ok"] = (df["y_true"] == df["y_pred"]).astype(float)
     wide = df.pivot_table(index=["seed", "fold", "index", "y_true"], columns="model",
                           values="ok", aggfunc="first").reset_index()
@@ -98,7 +102,7 @@ def load_preds(path):
     if len(complete) < len(wide):
         print(f"Attention : {len(wide) - len(complete)} lignes incomplètes ignorées "
               "(un des 3 modèles n'a pas de prédiction pour ce pli / cette graine). "
-              "Lance : python complete_preds.py <dataset>")
+              "Relance crossgated.py avec --save-preds.")
     seeds = sorted(complete["seed"].unique())
     print(f"{path} : graine(s) {seeds}, {complete['fold'].nunique()} plis, "
           f"{complete['index'].nunique()} extraits")
@@ -106,6 +110,7 @@ def load_preds(path):
 
 
 def complementarity(w):
+    """Percentages of the 4 cases (both / only one / none correct), the oracle, and the cases recovered or lost by CrossGated."""
     p, a, c = w["panns_only"] == 1, w["ast_only"] == 1, w["crossgated"] == 1
     only_p, only_a = p & ~a, a & ~p
     return pd.Series({
@@ -125,11 +130,12 @@ def complementarity(w):
 
 
 def complementarity_table(w):
+    """Complementarity per fold, averaged over the folds and then over the seeds (with the std between seeds)."""
     per_fold = w.groupby(["seed", "fold"]).apply(complementarity, include_groups=False)
     pct_cols = ["both_correct", "only_ast_correct", "only_panns_correct", "both_wrong",
                 "panns_only_acc", "ast_only_acc", "oracle", "crossgated_acc"]
-    per_seed = per_fold.groupby("seed")[pct_cols].mean()           # moyenne des plis
-    out = per_seed.mean().to_frame("mean")                         # puis moyenne des graines
+    per_seed = per_fold.groupby("seed")[pct_cols].mean()           # mean over the folds
+    out = per_seed.mean().to_frame("mean")                         # then mean over the seeds
     out["std_seeds"] = per_seed.std(ddof=0)
     counts = per_fold.groupby("seed")[["n_only_panns", "n_only_ast", "recovered", "lost"]].sum()
     tot = counts.sum()
@@ -143,6 +149,7 @@ def complementarity_table(w):
 
 
 def per_class_gain(w, names):
+    """Accuracy of each class for AST, PANNs and CrossGated, and the gain of CrossGated over AST."""
     rows = []
     for c, d in w.groupby("y_true"):
         by_seed = d.groupby("seed")[["crossgated", "ast_only", "panns_only"]].mean() * 100
@@ -158,6 +165,7 @@ def per_class_gain(w, names):
 
 
 def style(ax):
+    """Common look of the bar charts."""
     ax.grid(axis="x", color=GRID, linewidth=0.6, zorder=0)
     ax.tick_params(axis="x", labelsize=8, colors=MUTED)
     ax.tick_params(axis="y", length=0)
@@ -168,7 +176,8 @@ def style(ax):
 
 
 def plot(gain, gates, out):
-    if gates is not None:                     # même ordre que la figure des portes
+    """Draw the gain per class (a) and, if available, the gate difference (b); save as PDF and PNG."""
+    if gates is not None:                     # same order as the gate figure
         order = gates.sort_values("ecart_ast_moins_panns")["class"].tolist()
         gain = gain.set_index("class").loc[order].reset_index()
         gates = gates.set_index("class").loc[order].reset_index()
@@ -214,10 +223,11 @@ def plot(gain, gates, out):
 
 
 def main():
+    """Read the predictions, write the complementarity table and the gain-per-class files and figure."""
     ap = argparse.ArgumentParser()
     ap.add_argument("dataset", choices=["esc50", "urban"])
-    ap.add_argument("--preds", default=None, help="défaut : results_preds/<dataset>_preds.csv")
-    ap.add_argument("--gates", default=None, help="défaut : results_gates/<dataset>_gates_par_classe.csv")
+    ap.add_argument("--preds", default=None, help="default: results_preds/<dataset>_preds.csv")
+    ap.add_argument("--gates", default=None, help="default: results_gates/<dataset>_gates_par_classe.csv")
     ap.add_argument("--esc50-meta", default="ESC-50/meta/esc50.csv")
     ap.add_argument("--out", default="results_preds")
     args = ap.parse_args()
@@ -225,7 +235,7 @@ def main():
     w = load_preds(Path(args.preds or f"results_preds/{args.dataset}_preds.csv"))
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) complémentarité
+    # 1) complementarity of the two encoders
     comp = complementarity_table(w)
     comp.to_csv(out_dir / f"{args.dataset}_complementarite.csv", float_format="%.2f")
     labels = {
@@ -241,7 +251,7 @@ def main():
     for k, lab in labels.items():
         print(f"  {lab:<52} {comp.loc[k, 'mean']:6.1f} %  (± {comp.loc[k, 'std_seeds']:.1f} entre graines)")
 
-    # 2) gain par classe
+    # 2) gain per class
     names = class_names(args.dataset, args.esc50_meta)
     gain = per_class_gain(w, names)
     gain.sort_values("gain_vs_ast").to_csv(out_dir / f"{args.dataset}_gain_par_classe.csv",

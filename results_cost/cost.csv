@@ -1,4 +1,4 @@
 model,trainable_params,train_seconds_one_fold,head_ms_per_clip,n_train,check_acc_fold,frozen_params,encoder_ms_per_clip,total_ms_per_clip,hardware
-panns_only,340466,86.0359,0.6292,1600,89.7500,81837071,333.9257,334.5549,"CPU Intel64 Family 6 Model 142 Stepping 12, GenuineIntel, 4 threads"
-ast_only,176626,49.6040,0.4960,1600,94.5000,86187264,2863.6111,2864.1071,"CPU Intel64 Family 6 Model 142 Stepping 12, GenuineIntel, 4 threads"
-crossgated,537714,74.1360,0.8031,1600,94.0000,168024335,3197.5368,3198.3398,"CPU Intel64 Family 6 Model 142 Stepping 12, GenuineIntel, 4 threads"
+panns_only,340466,58.1815,0.4209,1600,89.7500,81837071,419.2525,419.6733,"CPU Intel64 Family 6 Model 142 Stepping 12, GenuineIntel, 4 threads"
+ast_only,176626,40.2032,0.3199,1600,94.5000,86187264,2995.8775,2996.1975,"CPU Intel64 Family 6 Model 142 Stepping 12, GenuineIntel, 4 threads"
+crossgated,537714,91.5891,1.3735,1600,94.0000,168024335,3415.1300,3416.5035,"CPU Intel64 Family 6 Model 142 Stepping 12, GenuineIntel, 4 threads"

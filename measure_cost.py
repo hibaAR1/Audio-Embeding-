@@ -1,20 +1,21 @@
+# Copyright (c) 2026 Hiba Arbel. Released under the MIT License (see the LICENSE file).
 """
-Coût du modèle CrossGated (point 6 : « notre modèle est léger »).
+Cost of the CrossGated model (point 6: "our model is light").
 
-Mesure, sur TA machine :
-  1) le nombre de paramètres des deux encodeurs gelés (PANNs CNN14 et AST) ;
-  2) le nombre de paramètres ENTRAÎNÉS de chaque tête (PANNs seul, AST seul, CrossGated) ;
-  3) le temps d'extraction d'un extrait de 5 s par chaque encodeur (médiane de 20 essais) ;
-  4) le temps d'entraînement d'une tête sur un pli d'ESC-50 (60 époques, mêmes réglages que l'article) ;
-  5) le temps de prédiction de la tête pour un extrait.
+Measures, on YOUR machine:
+  1) the number of parameters of the two frozen encoders (PANNs CNN14 and AST);
+  2) the number of TRAINED parameters of each head (PANNs only, AST only, CrossGated);
+  3) the time for each encoder to process one 5 s clip (median of 20 runs);
+  4) the time to train a head on one ESC-50 fold (60 epochs, same settings as the article);
+  5) the time for the head to predict one clip.
 
-Les encodeurs sont comptés par le script lui-même : aucun chiffre n'est recopié d'un article.
+The encoders are counted by the script itself: no number is copied from an article.
 
-Usage (dans le dossier du projet, .venv activé, rien d'autre ne tourne) :
+Usage (in the project folder, with the virtual environment active, nothing else running):
   python measure_cost.py
-  python measure_cost.py --skip-encoders     (seulement les têtes, si les encodeurs posent problème)
+  python measure_cost.py --skip-encoders     (heads only, if the encoders cause problems)
 
-Sorties : results_cost/cost.csv et un tableau LaTeX affiché à l'écran.
+Outputs: results_cost/cost.csv and a LaTeX table printed on screen.
 """
 import argparse
 import os
@@ -29,15 +30,17 @@ from sklearn.preprocessing import StandardScaler
 
 import crossgated as cg
 
-N_REPEAT, N_WARMUP = 20, 3
-HEADS = ["panns_only", "ast_only", "crossgated"]
+N_REPEAT, N_WARMUP = 20, 3      # 20 timed runs after 3 warm-up runs; the median is reported
+HEADS = ["panns_only", "ast_only", "crossgated"]     # the three heads whose cost is measured
 
 
 def n_params(module):
+    """Total number of parameters of a module."""
     return sum(p.numel() for p in module.parameters())
 
 
 def median_ms(fn):
+    """Median time of fn() in milliseconds (after a few warm-up runs)."""
     for _ in range(N_WARMUP):
         fn()
     times = []
@@ -49,6 +52,7 @@ def median_ms(fn):
 
 
 def measure_encoders(device):
+    """Parameters and inference time of the two frozen encoders for one 5 s clip."""
     from extract_features import ensure_panns_files, PANNS_CKPT, AST_MODEL, SR, AST_SR, N_SAMPLES
     from panns_inference import AudioTagging
     from transformers import ASTFeatureExtractor, ASTModel
@@ -59,6 +63,7 @@ def measure_encoders(device):
     ast_fe = ASTFeatureExtractor.from_pretrained(AST_MODEL)
     ast = ASTModel.from_pretrained(AST_MODEL).to(device).eval()
 
+    # A fixed random 5 s signal is enough to time the encoders
     wav32 = (np.random.default_rng(0).standard_normal(N_SAMPLES) * 0.1).astype(np.float32)
     wav16 = librosa.resample(wav32, orig_sr=SR, target_sr=AST_SR)
 
@@ -71,14 +76,15 @@ def measure_encoders(device):
             ast(**inputs)
 
     return {
-        "panns_params": n_params(panns.model),      # CNN14 complet (y compris sa couche de 527 classes AudioSet)
-        "ast_params": n_params(ast),                # AST sans tête de classification
+        "panns_params": n_params(panns.model),      # full CNN14 (including its 527-class AudioSet layer)
+        "ast_params": n_params(ast),                # AST without its classification head
         "panns_ms": median_ms(run_panns),
         "ast_ms": median_ms(run_ast),
     }
 
 
 def measure_heads(features_dir, ast_file, fold, device):
+    """Train each head on one fold; report trainable parameters, training time and prediction time per clip."""
     p, s, y, folds = cg.load_features(features_dir, ast_file)
     n_cls = len(np.unique(y))
     tr, te = folds != fold, folds == fold
@@ -102,10 +108,12 @@ def measure_heads(features_dir, ast_file, fold, device):
 
 
 def fmt_m(n):
+    """Format a number of parameters in millions for LaTeX (e.g. 0.54\\,M)."""
     return f"{n / 1e6:.1f}\\,M" if n >= 1e6 else f"{n / 1e6:.2f}\\,M"
 
 
 def main():
+    """Measure the cost of the model, write results_cost/cost.csv and print the LaTeX table of the article."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--features", default="features_v2/esc50")
     ap.add_argument("--ast-file", default="ast.npy")
